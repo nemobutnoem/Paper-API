@@ -3,11 +3,18 @@ package com.paperapi.paper_api.service;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.paperapi.paper_api.dto.PaperResponseDTO;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.text.PDFTextStripper;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
-import java.util.Collections;
-import java.util.List;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @Service
@@ -36,10 +43,21 @@ public class PaperService {
         dto.setTitle(work.title);
         dto.setPublicationYear(work.publicationYear);
         dto.setCitationCount(work.citedByCount);
+        // DOI
+        if (work.doi != null && !work.doi.isBlank()) {
+            dto.setDoi(work.doi);
+        }
         
-        // Abstract
+        // Abstract (reconstruct from OpenAlex inverted index if present)
         if (work.abstractInvertedIndex != null) {
-            dto.setAbstractText("Available in source");
+            String abs = reconstructAbstract(work.abstractInvertedIndex);
+            if (abs != null && !abs.isBlank()) {
+                dto.setAbstractText(abs);
+                // Provide a short preview (first ~500 chars)
+                dto.setContentPreview(abs.length() > 500 ? abs.substring(0, 500) + "..." : abs);
+                // Create 3-5 highlights from abstract sentences
+                dto.setHighlights(extractHighlights(abs, 5, dto.getKeywords()));
+            }
         }
         
         // Publication date
@@ -47,9 +65,33 @@ public class PaperService {
             dto.setPublicationDate(work.publicationDate);
         }
 
-        // PDF URL
+        // PDF URL (with fallbacks)
         if (work.primaryLocation != null && work.primaryLocation.pdfUrl != null) {
             dto.setPdfUrl(work.primaryLocation.pdfUrl);
+        } else if (work.bestOaLocation != null && work.bestOaLocation.pdfUrl != null) {
+            dto.setPdfUrl(work.bestOaLocation.pdfUrl);
+        } else if (work.openAccess != null && work.openAccess.oaUrl != null && work.openAccess.oaUrl.toLowerCase().endsWith(".pdf")) {
+            dto.setPdfUrl(work.openAccess.oaUrl);
+        }
+
+        // Landing page URL (with fallbacks)
+        String landing = null;
+        if (work.primaryLocation != null && work.primaryLocation.landingPageUrl != null) {
+            landing = work.primaryLocation.landingPageUrl;
+        } else if (work.bestOaLocation != null && work.bestOaLocation.landingPageUrl != null) {
+            landing = work.bestOaLocation.landingPageUrl;
+        } else if (work.openAccess != null && work.openAccess.oaUrl != null && !work.openAccess.oaUrl.toLowerCase().endsWith(".pdf")) {
+            landing = work.openAccess.oaUrl;
+        }
+        if (landing != null) {
+            dto.setLandingPageUrl(landing);
+        }
+
+        // Open access flag (with fallback)
+        if (work.openAccess != null) {
+            dto.setIsOpenAccess(work.openAccess.isOa);
+        } else if (work.primaryLocation != null) {
+            dto.setIsOpenAccess(work.primaryLocation.isOa);
         }
 
         // Authors with affiliations
@@ -109,36 +151,311 @@ public class PaperService {
         }
 
         // Keywords from concepts
-        if (work.concepts != null) {
+        if (work.concepts != null && !work.concepts.isEmpty()) {
             dto.setKeywords(work.concepts.stream()
                 .map(concept -> concept.displayName)
                 .collect(Collectors.toList()));
             
             // Research fields (top level concepts)
-            dto.setResearchFields(work.concepts.stream()
+            var fields = work.concepts.stream()
                 .filter(c -> c.level == 0 || c.level == 1)
                 .map(concept -> {
                     var fieldDto = new com.paperapi.paper_api.dto.ResearchFieldDTO();
                     fieldDto.setFieldName(concept.displayName);
                     fieldDto.setDescription("Level " + concept.level + " research area");
                     return fieldDto;
-                }).collect(Collectors.toList()));
-        } else {
-            dto.setKeywords(Collections.emptyList());
-            dto.setResearchFields(Collections.emptyList());
+                }).collect(Collectors.toList());
+            if (!fields.isEmpty()) {
+                dto.setResearchFields(fields);
+            }
+        }
+
+        // Fallback preview/highlights khi thiếu abstract
+        if (dto.getContentPreview() == null || dto.getContentPreview().isBlank()) {
+            String summary = buildFallbackSummary(work, dto.getKeywords());
+            if (summary != null && !summary.isBlank()) {
+                dto.setContentPreview(summary.length() > 500 ? summary.substring(0, 500) + "..." : summary);
+                dto.setHighlights(extractHighlights(summary, 5, dto.getKeywords()));
+            } else {
+                dto.setHighlights(null);
+            }
+        }
+
+        // Nếu highlights vẫn ít hoặc rỗng và có PDF, thử trích xuất từ toàn văn PDF
+        if ((dto.getHighlights() == null || dto.getHighlights().size() < 3)
+                && dto.getPdfUrl() != null && dto.getPdfUrl().toLowerCase().endsWith(".pdf")) {
+            List<String> pdfHL = tryExtractHighlightsFromPdf(dto.getPdfUrl(), dto.getKeywords());
+            if (pdfHL != null && !pdfHL.isEmpty()) {
+                dto.setHighlights(pdfHL);
+                // Nếu chưa có contentPreview, lấy đoạn mở đầu từ phần Introduction
+                if (dto.getContentPreview() == null || dto.getContentPreview().isBlank()) {
+                    String intro = lastExtractedIntroText;
+                    if (intro != null && !intro.isBlank()) {
+                        dto.setContentPreview(intro.length() > 500 ? intro.substring(0, 500) + "..." : intro);
+                    }
+                }
+            }
         }
 
         return dto;
+    }
+
+    // Reconstruct abstract text from OpenAlex's abstract_inverted_index structure
+    private String reconstructAbstract(Object invertedObj) {
+        if (!(invertedObj instanceof Map)) return null;
+        @SuppressWarnings("unchecked")
+        Map<String, Object> inverted = (Map<String, Object>) invertedObj;
+
+        int maxIndex = -1;
+        for (Object v : inverted.values()) {
+            if (v instanceof List<?>) {
+                for (Object o : (List<?>) v) {
+                    if (o instanceof Number) {
+                        maxIndex = Math.max(maxIndex, ((Number) o).intValue());
+                    }
+                }
+            }
+        }
+        if (maxIndex < 0) return null;
+
+        String[] words = new String[maxIndex + 1];
+        for (Map.Entry<String, Object> e : inverted.entrySet()) {
+            String token = e.getKey();
+            Object v = e.getValue();
+            if (v instanceof List<?>) {
+                for (Object o : (List<?>) v) {
+                    if (o instanceof Number) {
+                        int idx = ((Number) o).intValue();
+                        if (idx >= 0 && idx < words.length) words[idx] = token;
+                    }
+                }
+            }
+        }
+        return Arrays.stream(words).filter(Objects::nonNull).collect(Collectors.joining(" "));
+    }
+
+    // Extract 3-5 highlight sentences from abstract using simple keyword heuristics
+    private List<String> extractHighlights(String abstractText, int maxCount, List<String> keywords) {
+        if (abstractText == null || abstractText.isBlank()) return Collections.emptyList();
+        String[] sentences = abstractText.split("(?<=[.!?])\\s+");
+        List<String> keyPhrases = Arrays.asList("we ", "this paper", "our method", "results", "propose", "introduce", "conclude", "outperform", "significant");
+
+        List<String> ranked = new ArrayList<>();
+        // 1) Prefer sentences containing key phrases
+        for (String s : sentences) {
+            String lower = s.toLowerCase();
+            boolean good = keyPhrases.stream().anyMatch(lower::contains);
+            if (!good && keywords != null) {
+                for (String kw : keywords) {
+                    if (kw != null && !kw.isBlank() && lower.contains(kw.toLowerCase())) { good = true; break; }
+                }
+            }
+            if (good) ranked.add(s.trim());
+            if (ranked.size() >= maxCount) break;
+        }
+        // 2) If not enough, fill from the beginning
+        for (String s : sentences) {
+            if (ranked.size() >= maxCount) break;
+            String t = s.trim();
+            if (!t.isEmpty() && !ranked.contains(t)) ranked.add(t);
+        }
+        // Limit to 3-5 items
+        int cap = Math.max(3, Math.min(maxCount, 5));
+        return ranked.stream().limit(cap).collect(Collectors.toList());
+    }
+
+    // Build a short readable summary when abstract is missing
+    private String buildFallbackSummary(OpenAlexWork w, List<String> keywords) {
+        if (w == null) return null;
+        StringBuilder sb = new StringBuilder();
+        if (w.title != null && !w.title.isBlank()) {
+            sb.append(w.title.trim());
+            if (!sb.toString().endsWith(".")) sb.append(".");
+            sb.append(' ');
+        }
+        if (keywords != null && !keywords.isEmpty()) {
+            sb.append("Keywords: ");
+            sb.append(keywords.stream().filter(Objects::nonNull).limit(5).collect(Collectors.joining(", ")));
+            sb.append(". ");
+        }
+        if (w.primaryLocation != null && w.primaryLocation.source != null && w.primaryLocation.source.displayName != null) {
+            sb.append("Published in ").append(w.primaryLocation.source.displayName);
+            if (w.publicationYear > 0) sb.append(" (" + w.publicationYear + ")");
+            sb.append(". ");
+        } else if (w.publicationYear > 0) {
+            sb.append("Published in ").append(w.publicationYear).append(". ");
+        }
+        if (w.citedByCount > 0) sb.append("Citations: ").append(w.citedByCount).append(". ");
+        return sb.length() == 0 ? null : sb.toString().trim();
+    }
+
+    // --------- PDF full-text extraction & section-aware highlights ---------
+    private volatile String lastExtractedIntroText; // cache ngắn cho preview
+
+    private List<String> tryExtractHighlightsFromPdf(String pdfUrl, List<String> keywords) {
+        try {
+            HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+            URI uri = URI.create(pdfUrl);
+
+            // HEAD để kiểm tra kích thước, bỏ qua file quá lớn (> 30MB)
+            HttpRequest head = HttpRequest.newBuilder(uri)
+                    .method("HEAD", HttpRequest.BodyPublishers.noBody())
+                    .timeout(Duration.ofSeconds(10))
+                    .header("User-Agent", "Paper-API/1.0")
+                    .build();
+            HttpResponse<Void> headResp = client.send(head, HttpResponse.BodyHandlers.discarding());
+            Optional<String> lenStr = headResp.headers().firstValue("content-length");
+            if (lenStr.isPresent()) {
+                long len = Long.parseLong(lenStr.get());
+                if (len > 30L * 1024 * 1024) return null; // quá lớn
+            }
+
+            // GET tải nội dung
+            HttpRequest get = HttpRequest.newBuilder(uri)
+                    .GET()
+                    .timeout(Duration.ofSeconds(20))
+                    .header("User-Agent", "Paper-API/1.0")
+                    .build();
+            HttpResponse<InputStream> resp = client.send(get, HttpResponse.BodyHandlers.ofInputStream());
+            if (resp.statusCode() < 200 || resp.statusCode() >= 300) return null;
+
+            try (InputStream in = resp.body(); PDDocument doc = PDDocument.load(in)) {
+                int endPage = Math.min(doc.getNumberOfPages(), 12); // chỉ 12 trang đầu
+                PDFTextStripper stripper = new PDFTextStripper();
+                stripper.setStartPage(1);
+                stripper.setEndPage(endPage);
+                String text = stripper.getText(doc);
+                if (text == null || text.isBlank()) return null;
+
+                // Cắt theo mục và chọn câu
+                SectionedText st = splitBySections(text);
+                this.lastExtractedIntroText = st.introduction != null ? firstParagraph(st.introduction) : null;
+                return extractSectionAwareHighlights(st, keywords, 6);
+            }
+        } catch (Exception ignore) {
+            return null;
+        }
+    }
+
+    private static class SectionedText {
+        String introduction;
+        String methods;
+        String results;
+        String discussion;
+        String conclusion;
+        String body;
+    }
+
+    private SectionedText splitBySections(String text) {
+        SectionedText st = new SectionedText();
+        String t = text.replace('\r', '\n');
+        // Chuẩn hoá tiêu đề dòng
+        String[] lines = t.split("\n");
+        String curName = "body";
+        Map<String, StringBuilder> map = new HashMap<>();
+        map.put("introduction", new StringBuilder());
+        map.put("methods", new StringBuilder());
+        map.put("results", new StringBuilder());
+        map.put("discussion", new StringBuilder());
+        map.put("conclusion", new StringBuilder());
+        map.put("body", new StringBuilder());
+
+        for (String raw : lines) {
+            String line = raw.trim();
+            String lower = line.toLowerCase();
+            if (line.length() <= 120 && (
+                    lower.equals("introduction") || lower.startsWith("introduction ") ||
+                    lower.equals("background") ||
+                    lower.equals("materials and methods") || lower.equals("methods") || lower.equals("methodology") ||
+                    lower.equals("results") ||
+                    lower.equals("discussion") ||
+                    lower.equals("conclusion") || lower.equals("conclusions") || lower.startsWith("conclusion ")
+            )) {
+                curName = sectionKey(lower);
+                continue;
+            }
+            map.get(curName).append(line).append(' ');
+        }
+        st.introduction = map.get("introduction").toString().trim();
+        // gộp background vào introduction
+        // (ở logic hiện tại không tách background riêng)
+        st.methods = map.get("methods").toString().trim();
+        st.results = map.get("results").toString().trim();
+        st.discussion = map.get("discussion").toString().trim();
+        st.conclusion = map.get("conclusion").toString().trim();
+        st.body = map.get("body").toString().trim();
+        return st;
+    }
+
+    private String sectionKey(String lower) {
+        if (lower.startsWith("abstract")) return "abstract";
+        if (lower.startsWith("introduction") || lower.equals("background")) return "introduction";
+        if (lower.contains("materials and methods") || lower.startsWith("methods") || lower.equals("methodology")) return "methods";
+        if (lower.startsWith("results")) return "results";
+        if (lower.startsWith("discussion")) return "discussion";
+        if (lower.startsWith("conclusion")) return "conclusion";
+        return "body";
+    }
+
+    private List<String> extractSectionAwareHighlights(SectionedText st, List<String> keywords, int maxTotal) {
+        List<String> out = new ArrayList<>();
+        addBestSentence(out, st.introduction, keywords, 2);
+        addBestSentence(out, st.methods, keywords, 2);
+        addBestSentence(out, st.results, keywords, 3);
+        addBestSentence(out, st.discussion, keywords, 2);
+        addBestSentence(out, st.conclusion, keywords, 2);
+        if (out.size() < Math.max(3, maxTotal)) {
+            addBestSentence(out, st.body, keywords, 1);
+        }
+        // rút gọn số lượng
+        int cap = Math.max(3, Math.min(maxTotal, 6));
+        return out.stream().filter(Objects::nonNull).distinct().limit(cap).collect(Collectors.toList());
+    }
+
+    private void addBestSentence(List<String> out, String sectionText, List<String> keywords, int strength) {
+        if (sectionText == null || sectionText.isBlank()) return;
+        String[] sentences = sectionText.split("(?<=[.!?])\\s+");
+        double bestScore = -1;
+        String best = null;
+        for (String s : sentences) {
+            String t = s.trim();
+            if (t.length() < 40 || t.length() > 300) continue;
+            double sc = scoreSentence(t, keywords) * strength;
+            if (sc > bestScore) { bestScore = sc; best = t; }
+        }
+        if (best != null) out.add(best);
+    }
+
+    private double scoreSentence(String s, List<String> keywords) {
+        String lower = s.toLowerCase();
+        List<String> keyPhrases = Arrays.asList("we ", "this paper", "our method", "results", "propose", "introduce", "conclude", "significant", "%", "accuracy", "improve");
+        double score = 0;
+        for (String kp : keyPhrases) if (lower.contains(kp)) score += 1.5;
+        if (keywords != null) {
+            for (String kw : keywords) if (kw != null && lower.contains(kw.toLowerCase())) score += 1.0;
+        }
+        // ưu tiên câu có số liệu
+        if (lower.matches(".*[0-9]+(\\.[0-9]+)?%?.*")) score += 0.5;
+        return score;
+    }
+
+    private String firstParagraph(String text) {
+        if (text == null) return null;
+        String[] parts = text.split("\n\n|(?<=[.!?])\s{2,}");
+        return parts.length > 0 ? parts[0].trim() : text.trim();
     }
 
     // --- Lớp nội bộ để hứng JSON từ OpenAlex ---
     @JsonIgnoreProperties(ignoreUnknown = true)
     private static class OpenAlexWork {
         public String title;
+        public String doi;
         @JsonProperty("publication_year") public int publicationYear;
         @JsonProperty("publication_date") public String publicationDate;
         @JsonProperty("cited_by_count") public long citedByCount;
         @JsonProperty("primary_location") public Location primaryLocation;
+        @JsonProperty("best_oa_location") public Location bestOaLocation;
+        @JsonProperty("open_access") public OpenAccess openAccess;
         @JsonProperty("abstract_inverted_index") public Object abstractInvertedIndex;
         public List<Authorship> authorships;
         public List<Concept> concepts;
@@ -155,6 +472,8 @@ public class PaperService {
     private static class Location {
         public Source source;
         @JsonProperty("pdf_url") public String pdfUrl;
+        @JsonProperty("landing_page_url") public String landingPageUrl;
+        @JsonProperty("is_oa") public Boolean isOa;
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
@@ -163,6 +482,13 @@ public class PaperService {
         public String type;
         @JsonProperty("issn_l") public String issn;
         public String publisher;
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private static class OpenAccess {
+        @JsonProperty("is_oa") public Boolean isOa;
+        @JsonProperty("oa_url") public String oaUrl;
+        @JsonProperty("oa_status") public String oaStatus;
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
