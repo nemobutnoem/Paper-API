@@ -48,18 +48,6 @@ public class PaperService {
             dto.setDoi(work.doi);
         }
         
-        // Abstract (reconstruct from OpenAlex inverted index if present)
-        if (work.abstractInvertedIndex != null) {
-            String abs = reconstructAbstract(work.abstractInvertedIndex);
-            if (abs != null && !abs.isBlank()) {
-                dto.setAbstractText(abs);
-                // Provide a short preview (first ~500 chars)
-                dto.setContentPreview(abs.length() > 500 ? abs.substring(0, 500) + "..." : abs);
-                // Create 3-5 highlights from abstract sentences
-                dto.setHighlights(extractHighlights(abs, 5, dto.getKeywords()));
-            }
-        }
-        
         // Publication date
         if (work.publicationDate != null) {
             dto.setPublicationDate(work.publicationDate);
@@ -150,11 +138,13 @@ public class PaperService {
             }
         }
 
-        // Keywords from concepts
+        // Keywords from concepts (SET TRƯỚC để dùng cho highlights)
+        List<String> keywords = null;
         if (work.concepts != null && !work.concepts.isEmpty()) {
-            dto.setKeywords(work.concepts.stream()
+            keywords = work.concepts.stream()
                 .map(concept -> concept.displayName)
-                .collect(Collectors.toList()));
+                .collect(Collectors.toList());
+            dto.setKeywords(keywords);
             
             // Research fields (top level concepts)
             var fields = work.concepts.stream()
@@ -170,20 +160,43 @@ public class PaperService {
             }
         }
 
+        // Abstract (reconstruct và tạo highlights)
+        if (work.abstractInvertedIndex != null) {
+            String abs = reconstructAbstract(work.abstractInvertedIndex);
+            if (abs != null && !abs.isBlank()) {
+                dto.setAbstractText(abs);
+                // Provide a short preview (first ~500 chars)
+                dto.setContentPreview(abs.length() > 500 ? abs.substring(0, 500) + "..." : abs);
+                // Create highlights from abstract sentences
+                List<String> hs = extractHighlights(abs, 10, keywords);
+                hs = filterNonContentHighlights(hs, work.title);
+                // Nếu filter loại hết, lấy lại từ abstract không filter
+                if (hs.isEmpty()) {
+                    hs = extractHighlights(abs, 10, keywords);
+                }
+                if (!hs.isEmpty()) {
+                    dto.setHighlights(hs);
+                }
+            }
+        }
+
         // Fallback preview/highlights khi thiếu abstract
         if (dto.getContentPreview() == null || dto.getContentPreview().isBlank()) {
             String summary = buildFallbackSummary(work, dto.getKeywords());
             if (summary != null && !summary.isBlank()) {
                 dto.setContentPreview(summary.length() > 500 ? summary.substring(0, 500) + "..." : summary);
-                dto.setHighlights(extractHighlights(summary, 5, dto.getKeywords()));
-            } else {
-                dto.setHighlights(null);
+                List<String> hs = extractHighlights(summary, 10, dto.getKeywords());
+                hs = filterNonContentHighlights(hs, work.title);
+                // Nếu không có highlights hợp lệ, không set (để PDF fallback xử lý)
+                if (!hs.isEmpty()) {
+                    dto.setHighlights(hs);
+                }
             }
         }
 
         // Nếu highlights vẫn ít hoặc rỗng và có PDF, thử trích xuất từ toàn văn PDF
-        if ((dto.getHighlights() == null || dto.getHighlights().size() < 3)
-                && dto.getPdfUrl() != null && dto.getPdfUrl().toLowerCase().endsWith(".pdf")) {
+        if ((dto.getHighlights() == null || dto.getHighlights().size() < 5)
+                && dto.getPdfUrl() != null) {
             List<String> pdfHL = tryExtractHighlightsFromPdf(dto.getPdfUrl(), dto.getKeywords());
             if (pdfHL != null && !pdfHL.isEmpty()) {
                 dto.setHighlights(pdfHL);
@@ -234,7 +247,7 @@ public class PaperService {
         return Arrays.stream(words).filter(Objects::nonNull).collect(Collectors.joining(" "));
     }
 
-    // Extract 3-5 highlight sentences from abstract using simple keyword heuristics
+    // Extract 5-10 highlight sentences from abstract using simple keyword heuristics
     private List<String> extractHighlights(String abstractText, int maxCount, List<String> keywords) {
         if (abstractText == null || abstractText.isBlank()) return Collections.emptyList();
         String[] sentences = abstractText.split("(?<=[.!?])\\s+");
@@ -259,8 +272,8 @@ public class PaperService {
             String t = s.trim();
             if (!t.isEmpty() && !ranked.contains(t)) ranked.add(t);
         }
-        // Limit to 3-5 items
-        int cap = Math.max(3, Math.min(maxCount, 5));
+        // Limit to 5-10 items
+        int cap = Math.max(5, Math.min(maxCount, 10));
         return ranked.stream().limit(cap).collect(Collectors.toList());
     }
 
@@ -330,7 +343,7 @@ public class PaperService {
                 // Cắt theo mục và chọn câu
                 SectionedText st = splitBySections(text);
                 this.lastExtractedIntroText = st.introduction != null ? firstParagraph(st.introduction) : null;
-                return extractSectionAwareHighlights(st, keywords, 6);
+                return extractSectionAwareHighlights(st, keywords, 10);
             }
         } catch (Exception ignore) {
             return null;
@@ -399,31 +412,40 @@ public class PaperService {
 
     private List<String> extractSectionAwareHighlights(SectionedText st, List<String> keywords, int maxTotal) {
         List<String> out = new ArrayList<>();
-        addBestSentence(out, st.introduction, keywords, 2);
-        addBestSentence(out, st.methods, keywords, 2);
-        addBestSentence(out, st.results, keywords, 3);
-        addBestSentence(out, st.discussion, keywords, 2);
-        addBestSentence(out, st.conclusion, keywords, 2);
-        if (out.size() < Math.max(3, maxTotal)) {
-            addBestSentence(out, st.body, keywords, 1);
+        addBestSentences(out, st.introduction, keywords, 2, 2);
+        addBestSentences(out, st.methods, keywords, 2, 1);
+        addBestSentences(out, st.results, keywords, 3, 3);
+        addBestSentences(out, st.discussion, keywords, 2, 2);
+        addBestSentences(out, st.conclusion, keywords, 2, 2);
+        if (out.size() < Math.max(5, maxTotal)) {
+            addBestSentences(out, st.body, keywords, 1, 1);
         }
         // rút gọn số lượng
-        int cap = Math.max(3, Math.min(maxTotal, 6));
+        int cap = Math.max(5, Math.min(maxTotal, 10));
         return out.stream().filter(Objects::nonNull).distinct().limit(cap).collect(Collectors.toList());
     }
 
-    private void addBestSentence(List<String> out, String sectionText, List<String> keywords, int strength) {
+    private void addBestSentences(List<String> out, String sectionText, List<String> keywords, int strength, int count) {
         if (sectionText == null || sectionText.isBlank()) return;
         String[] sentences = sectionText.split("(?<=[.!?])\\s+");
-        double bestScore = -1;
-        String best = null;
+        List<ScoredSentence> scored = new ArrayList<>();
         for (String s : sentences) {
             String t = s.trim();
             if (t.length() < 40 || t.length() > 300) continue;
             double sc = scoreSentence(t, keywords) * strength;
-            if (sc > bestScore) { bestScore = sc; best = t; }
+            scored.add(new ScoredSentence(t, sc));
         }
-        if (best != null) out.add(best);
+        scored.sort((a, b) -> Double.compare(b.score, a.score));
+        scored.stream().limit(count).map(ss -> ss.sentence).forEach(out::add);
+    }
+
+    private static class ScoredSentence {
+        String sentence;
+        double score;
+        ScoredSentence(String sentence, double score) {
+            this.sentence = sentence;
+            this.score = score;
+        }
     }
 
     private double scoreSentence(String s, List<String> keywords) {
@@ -443,6 +465,36 @@ public class PaperService {
         if (text == null) return null;
         String[] parts = text.split("\n\n|(?<=[.!?])\s{2,}");
         return parts.length > 0 ? parts[0].trim() : text.trim();
+    }
+
+    // Loại bỏ câu không thuộc nội dung (tiêu đề, metadata)
+    private List<String> filterNonContentHighlights(List<String> hs, String title) {
+        if (hs == null) return Collections.emptyList();
+        String normTitle = normalizeForComparison(title);
+        return hs.stream()
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .filter(s -> {
+                    String normalized = normalizeForComparison(s);
+                    if (normTitle != null) {
+                        if (normalized.equals(normTitle)) return false; // bỏ tiêu đề nguyên bản
+                        if (normalized.contains(normTitle)) return false; // bỏ câu chứa tiêu đề
+                        if (normTitle.contains(normalized) && normalized.length() > 0) return false; // bỏ biến thể tiêu đề
+                    }
+                    String lower = s.toLowerCase();
+                    if (lower.startsWith("keywords:")) return false;
+                    if (lower.startsWith("published in")) return false;
+                    if (lower.startsWith("citations:")) return false;
+                    return true;
+                })
+                .collect(Collectors.toList());
+    }
+
+    private String normalizeForComparison(String input) {
+        if (input == null) return null;
+        String normalized = input.toLowerCase().replaceAll("[^a-z0-9]+", " ").trim();
+        return normalized.replaceAll("\\s+", " ");
     }
 
     // --- Lớp nội bộ để hứng JSON từ OpenAlex ---
