@@ -189,4 +189,114 @@ public class PaperService {
         @JsonProperty("display_name") public String displayName;
         public int level;
     }
+    
+    /**
+     * Lấy citations từ Semantic Scholar
+     */
+    public CitationsResponse getCitationsFromSemanticScholar(String doi) {
+        String url = "https://api.semanticscholar.org/graph/v1/paper/DOI:" + doi 
+                   + "?fields=title,year,citationCount,citations.title,citations.externalIds,citations.year,citations.authors";
+        
+        try {
+            SemanticScholarPaper response = restTemplate.getForObject(url, SemanticScholarPaper.class);
+            
+            CitationsResponse citationsResponse = new CitationsResponse();
+            if (response != null && response.citations != null) {
+                citationsResponse.setCitations(response.citations.stream()
+                    .map(c -> {
+                        Citation citation = new Citation();
+                        citation.setTitle(c.title);
+                        citation.setYear(c.year);
+                        
+                        // Ưu tiên DOI để tạo link trực tiếp đến bài báo gốc
+                        if (c.externalIds != null && c.externalIds.doi != null) {
+                            citation.setDoi(c.externalIds.doi);
+                            citation.setUrl("https://doi.org/" + c.externalIds.doi);
+                        } else {
+                            // Fallback: Dùng link Semantic Scholar nếu không có DOI
+                            citation.setUrl("https://www.semanticscholar.org/paper/" + c.paperId);
+                        }
+                        
+                        if (c.authors != null && !c.authors.isEmpty()) {
+                            citation.setAuthors(c.authors.stream()
+                                .map(a -> a.name)
+                                .collect(Collectors.toList()));
+                        }
+                        return citation;
+                    })
+                    .collect(Collectors.toList()));
+            } else {
+                citationsResponse.setCitations(Collections.emptyList());
+            }
+            return citationsResponse;
+        } catch (Exception e) {
+            CitationsResponse empty = new CitationsResponse();
+            empty.setCitations(Collections.emptyList());
+            return empty;
+        }
+    }
+    
+    // DTOs for Semantic Scholar
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private static class SemanticScholarPaper {
+        public String title;
+        public Integer year;
+        public Long citationCount;
+        public List<CitationData> citations;
+    }
+    
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private static class CitationData {
+        public String paperId;
+        public String title;
+        public Integer year;
+        public List<AuthorData> authors;
+        public ExternalIds externalIds;
+    }
+    
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private static class ExternalIds {
+        @JsonProperty("DOI") 
+        public String doi;
+    }
+    
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private static class AuthorData {
+        public String name;
+    }
+    
+    public static class CitationsResponse {
+        private List<Citation> citations;
+        
+        public List<Citation> getCitations() {
+            return citations;
+        }
+        
+        public void setCitations(List<Citation> citations) {
+            this.citations = citations;
+        }
+    }
+    
+    public static class Citation {
+        private String title;
+        private String url;
+        private String doi;
+        private Integer year;
+        private List<String> authors;
+        
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+        
+        public String getUrl() { return url; }
+        public void setUrl(String url) { this.url = url; }
+        
+        public String getDoi() { return doi; }
+        public void setDoi(String doi) { this.doi = doi; }
+        
+        public Integer getYear() { return year; }
+        public void setYear(Integer year) { this.year = year; }
+        
+        public List<String> getAuthors() { return authors; }
+        public void setAuthors(List<String> authors) { this.authors = authors; }
+    }
 }
