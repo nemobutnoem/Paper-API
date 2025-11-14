@@ -2,13 +2,15 @@ package com.paperapi.paper_api.entity;
 
 import jakarta.persistence.*;
 import lombok.Data;
+import lombok.EqualsAndHashCode;
 import java.io.Serializable;
 
 @Entity
 @Table(name = "paper_field")
 @Data
+@EqualsAndHashCode(exclude = { "paper", "researchField" })
 public class PaperField {
-    
+
     @EmbeddedId
     private PaperFieldId id;
 

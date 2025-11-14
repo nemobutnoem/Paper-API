@@ -44,18 +44,25 @@ public class PaperPersistenceService {
     }
 
     /**
-     * Lấy paper từ database theo DOI
+     * Lấy paper từ database theo DOI với tất cả relationships
      */
+    @Transactional(readOnly = true)
     public Paper getPaperByDoi(String doi) {
-        return paperRepository.findByDoi(doi)
+        return paperRepository.findByDoiWithRelations(doi)
                 .orElseThrow(() -> new RuntimeException("Paper with DOI " + doi + " not found"));
     }
 
+    /**
+     * Save paper if not exists, return existing paper if already saved
+     * 
+     * @return Object[] {Paper, boolean isNew}
+     */
     @Transactional
-    public Paper savePaper(PaperResponseDTO dto, String doi) {
-        // Check if paper already exists
-        if (paperRepository.findByDoi(doi).isPresent()) {
-            throw new RuntimeException("Paper with DOI " + doi + " already exists");
+    public Object[] saveOrGetPaper(PaperResponseDTO dto, String doi) {
+        // Check if paper already exists - use eager fetch to load all relationships
+        var existingPaper = paperRepository.findByDoiWithRelations(doi);
+        if (existingPaper.isPresent()) {
+            return new Object[] { existingPaper.get(), false };
         }
 
         // Create and save paper
@@ -66,7 +73,7 @@ public class PaperPersistenceService {
         paper.setPublicationDate(dto.getPublicationDate());
         paper.setCitationCount(dto.getCitationCount());
         paper.setPdfUrl(dto.getPdfUrl());
-        
+
         // Convert keywords list to comma-separated string
         if (dto.getKeywords() != null && !dto.getKeywords().isEmpty()) {
             paper.setKeywords(String.join(", ", dto.getKeywords()));
@@ -75,7 +82,7 @@ public class PaperPersistenceService {
         // Handle Journal and Volume
         if (dto.getJournal() != null) {
             Journal journal = saveOrGetJournal(dto.getJournal());
-            
+
             if (dto.getVolume() != null) {
                 Volume volume = new Volume();
                 volume.setVolumeNumber(dto.getVolume().getVolumeNumber());
@@ -101,7 +108,7 @@ public class PaperPersistenceService {
             int order = 1;
             for (AuthorDTO authorDTO : dto.getAuthors()) {
                 Author author = saveOrGetAuthor(authorDTO);
-                
+
                 PaperAuthor paperAuthor = new PaperAuthor();
                 PaperAuthor.PaperAuthorId id = new PaperAuthor.PaperAuthorId();
                 id.setPaperId(paper.getPaperId());
@@ -110,7 +117,7 @@ public class PaperPersistenceService {
                 paperAuthor.setPaper(paper);
                 paperAuthor.setAuthor(author);
                 paperAuthor.setAuthorOrder(order++);
-                
+
                 paperAuthorRepository.save(paperAuthor);
             }
         }
@@ -119,7 +126,7 @@ public class PaperPersistenceService {
         if (dto.getResearchFields() != null) {
             for (ResearchFieldDTO fieldDTO : dto.getResearchFields()) {
                 ResearchField field = saveOrGetResearchField(fieldDTO);
-                
+
                 PaperField paperField = new PaperField();
                 PaperField.PaperFieldId id = new PaperField.PaperFieldId();
                 id.setPaperId(paper.getPaperId());
@@ -127,12 +134,19 @@ public class PaperPersistenceService {
                 paperField.setId(id);
                 paperField.setPaper(paper);
                 paperField.setResearchField(field);
-                
+
                 paperFieldRepository.save(paperField);
             }
         }
 
-        return paper;
+        return new Object[] { paper, true };
+    }
+
+    /**
+     * Check if a paper with given DOI exists
+     */
+    public boolean isPaperExists(String doi) {
+        return paperRepository.findByDoi(doi).isPresent();
     }
 
     private Author saveOrGetAuthor(AuthorDTO dto) {

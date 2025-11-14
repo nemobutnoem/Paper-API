@@ -8,6 +8,7 @@ import com.paperapi.paper_api.service.MetadataService;
 import com.paperapi.paper_api.service.PaperPersistenceService;
 import com.paperapi.paper_api.service.PaperService;
 import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -25,8 +26,8 @@ public class PaperController {
 	private final MetadataService metadataService;
 	private final MetadataAnalyzer metadataAnalyzer;
 
-	public PaperController(PaperService paperService, PaperPersistenceService paperPersistenceService, 
-	                       MetadataService metadataService, MetadataAnalyzer metadataAnalyzer) {
+	public PaperController(PaperService paperService, PaperPersistenceService paperPersistenceService,
+			MetadataService metadataService, MetadataAnalyzer metadataAnalyzer) {
 		this.paperService = paperService;
 		this.paperPersistenceService = paperPersistenceService;
 		this.metadataService = metadataService;
@@ -43,6 +44,7 @@ public class PaperController {
 	}
 
 	@PostMapping("/papers/save")
+	@Transactional
 	public ResponseEntity<?> savePaperByDoi(@RequestParam("doi") String doi) {
 		try {
 			// 1. Fetch paper info from OpenAlex
@@ -53,41 +55,67 @@ public class PaperController {
 
 			System.out.println("✅ Step 1: Fetched paper from OpenAlex");
 
-			// 2. Phân tích JSON và cập nhật metadata schema
-			Map<String, Object> metadataResult = metadataAnalyzer.analyzeAndUpdateMetadata(dto, "paper");
-			System.out.println("✅ Step 2: Metadata analysis result: " + metadataResult);
+			// 2. Save to database hoặc lấy paper đã tồn tại (Idempotent)
+			// Note: Không cần analyze metadata mỗi lần - đã có static metadata từ SQL
+			// scripts
+			Object[] result = paperPersistenceService.saveOrGetPaper(dto, doi);
+			Paper savedPaper = (Paper) result[0];
+			boolean isNew = (boolean) result[1];
 
-			// 3. Save to database hoặc lấy paper đã tồn tại
-			Paper savedPaper;
-			try {
-				savedPaper = paperPersistenceService.savePaper(dto, doi);
-				System.out.println("✅ Step 3: Saved new paper with ID: " + savedPaper.getPaperId());
-			} catch (RuntimeException e) {
-				// Nếu paper đã tồn tại, lấy từ database
-				if (e.getMessage() != null && e.getMessage().contains("already exists")) {
-					savedPaper = paperPersistenceService.getPaperByDoi(doi);
-					System.out.println("✅ Step 3: Retrieved existing paper with ID: " + savedPaper.getPaperId());
-				} else {
-					throw e;
-				}
+			if (isNew) {
+				System.out.println("✅ Step 2: Saved new paper with ID: " + savedPaper.getPaperId());
+			} else {
+				System.out.println("✅ Step 2: Paper already exists with ID: " + savedPaper.getPaperId());
 			}
-			
-			// 4. Filter info using metadata
+
+			// 3. Filter info using metadata (AI-powered analysis)
 			FilteredPaperDTO filtered = metadataService.filterPaperInfo(savedPaper.getPaperId());
-			System.out.println("✅ Step 4: Filtered paper info with " + 
-				(filtered.getImportantFields() != null ? filtered.getImportantFields().size() : 0) + " important fields");
-			
-			return ResponseEntity.ok(filtered);
+			System.out.println("✅ Step 3: AI analysis completed - Quality Score: " +
+					(filtered.getQualityAssessment() != null ? filtered.getQualityAssessment().getOverallScore() : 0));
+
+			// Add metadata to response
+			Map<String, Object> response = new java.util.HashMap<>();
+			response.put("data", filtered);
+			response.put("isNew", isNew);
+			response.put("message", isNew ? "Paper saved successfully" : "Paper already exists in database");
+
+			return ResponseEntity.ok(response);
 		} catch (Exception e) {
 			e.printStackTrace();
 			String errorMsg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
 			return ResponseEntity.badRequest().body(Map.of(
-				"error", errorMsg,
-				"type", e.getClass().getSimpleName()
-			));
+					"error", errorMsg,
+					"type", e.getClass().getSimpleName()));
 		}
 	}
-	
+
+	/**
+	 * Lấy thông tin filtered của paper đã lưu theo DOI
+	 */
+	@GetMapping("/papers/filtered")
+	@Transactional(readOnly = true)
+	public ResponseEntity<?> getFilteredPaper(@RequestParam("doi") String doi) {
+		try {
+			// Check if paper exists
+			if (!paperPersistenceService.isPaperExists(doi)) {
+				return ResponseEntity.notFound().build();
+			}
+
+			// Get paper and filter
+			Paper paper = paperPersistenceService.getPaperByDoi(doi);
+			FilteredPaperDTO filtered = metadataService.filterPaperInfo(paper.getPaperId());
+
+			Map<String, Object> response = new java.util.HashMap<>();
+			response.put("data", filtered);
+			response.put("isNew", false);
+			response.put("message", "Paper already exists in database");
+
+			return ResponseEntity.ok(response);
+		} catch (Exception e) {
+			return ResponseEntity.badRequest().body("Error: " + e.getMessage());
+		}
+	}
+
 	/**
 	 * Lấy citations từ Semantic Scholar
 	 */
@@ -99,7 +127,7 @@ public class PaperController {
 			return ResponseEntity.badRequest().body("Error: " + e.getMessage());
 		}
 	}
-	
+
 	/**
 	 * Lấy metadata schema của một table
 	 */
@@ -107,6 +135,21 @@ public class PaperController {
 	public ResponseEntity<?> getTableMetadata(@RequestParam("tableName") String tableName) {
 		try {
 			return ResponseEntity.ok(metadataAnalyzer.getTableMetadata(tableName));
+		} catch (Exception e) {
+			return ResponseEntity.badRequest().body("Error: " + e.getMessage());
+		}
+	}
+
+	/**
+	 * Kiểm tra paper đã được lưu chưa
+	 */
+	@GetMapping("/papers/exists")
+	public ResponseEntity<?> checkPaperExists(@RequestParam("doi") String doi) {
+		try {
+			boolean exists = paperPersistenceService.isPaperExists(doi);
+			return ResponseEntity.ok(Map.of(
+					"exists", exists,
+					"doi", doi));
 		} catch (Exception e) {
 			return ResponseEntity.badRequest().body("Error: " + e.getMessage());
 		}

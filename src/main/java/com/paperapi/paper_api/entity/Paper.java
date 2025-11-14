@@ -2,6 +2,7 @@ package com.paperapi.paper_api.entity;
 
 import jakarta.persistence.*;
 import lombok.Data;
+import lombok.EqualsAndHashCode;
 import lombok.ToString;
 
 import java.util.HashSet;
@@ -10,6 +11,7 @@ import java.util.Set;
 @Entity
 @Table(name = "paper")
 @Data
+@EqualsAndHashCode(exclude = { "paperAuthors", "paperFields", "volume", "conference" })
 public class Paper {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
