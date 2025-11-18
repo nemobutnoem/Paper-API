@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -112,6 +113,21 @@ public class PaperController {
 
 			return ResponseEntity.ok(response);
 		} catch (Exception e) {
+			return ResponseEntity.badRequest().body("Error: " + e.getMessage());
+		}
+	}
+
+	/**
+	 * Tìm kiếm các bài báo tương tự về mặt ngữ nghĩa
+	 */
+	@GetMapping("/papers/search/similar")
+	public ResponseEntity<?> findSimilarPapers(@RequestParam("query") String query,
+			@RequestParam(value = "limit", defaultValue = "10") int limit) {
+		try {
+			List<FilteredPaperDTO> similarPapers = paperService.findSimilarPapers(query, limit);
+			return ResponseEntity.ok(similarPapers);
+		} catch (Exception e) {
+			e.printStackTrace();
 			return ResponseEntity.badRequest().body("Error: " + e.getMessage());
 		}
 	}

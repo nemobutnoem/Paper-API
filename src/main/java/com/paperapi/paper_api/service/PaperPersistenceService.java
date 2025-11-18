@@ -3,8 +3,12 @@ package com.paperapi.paper_api.service;
 import com.paperapi.paper_api.dto.*;
 import com.paperapi.paper_api.entity.*;
 import com.paperapi.paper_api.repository.*;
+import com.pgvector.PGvector;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+import java.util.stream.Collectors;
 
 @Service
 public class PaperPersistenceService {
@@ -19,6 +23,7 @@ public class PaperPersistenceService {
     private final ResearchFieldRepository researchFieldRepository;
     private final PaperAuthorRepository paperAuthorRepository;
     private final PaperFieldRepository paperFieldRepository;
+    private final VectorService vectorService;
 
     public PaperPersistenceService(
             PaperRepository paperRepository,
@@ -30,7 +35,8 @@ public class PaperPersistenceService {
             ConferenceRepository conferenceRepository,
             ResearchFieldRepository researchFieldRepository,
             PaperAuthorRepository paperAuthorRepository,
-            PaperFieldRepository paperFieldRepository) {
+            PaperFieldRepository paperFieldRepository,
+            VectorService vectorService) {
         this.paperRepository = paperRepository;
         this.authorRepository = authorRepository;
         this.affiliationRepository = affiliationRepository;
@@ -41,6 +47,7 @@ public class PaperPersistenceService {
         this.researchFieldRepository = researchFieldRepository;
         this.paperAuthorRepository = paperAuthorRepository;
         this.paperFieldRepository = paperFieldRepository;
+        this.vectorService = vectorService;
     }
 
     /**
@@ -77,6 +84,17 @@ public class PaperPersistenceService {
         // Convert keywords list to comma-separated string
         if (dto.getKeywords() != null && !dto.getKeywords().isEmpty()) {
             paper.setKeywords(String.join(", ", dto.getKeywords()));
+        }
+
+        // Generate and set embedding
+        String textToEmbed = dto.getTitle() + " " + dto.getAbstractText();
+        List<Double> embedding = vectorService.getEmbedding(textToEmbed);
+        if (embedding != null && !embedding.isEmpty()) {
+            float[] floatArray = new float[embedding.size()];
+            for (int i = 0; i < embedding.size(); i++) {
+                floatArray[i] = embedding.get(i).floatValue();
+            }
+            paper.setEmbedding(new PGvector(floatArray));
         }
 
         // Handle Journal and Volume

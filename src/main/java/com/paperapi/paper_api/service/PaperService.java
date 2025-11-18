@@ -3,6 +3,9 @@ package com.paperapi.paper_api.service;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.paperapi.paper_api.dto.PaperResponseDTO;
+import com.paperapi.paper_api.entity.Paper;
+import com.paperapi.paper_api.repository.PaperRepository;
+import com.pgvector.PGvector;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
@@ -14,10 +17,67 @@ import java.util.stream.Collectors;
 public class PaperService {
 
     private final RestTemplate restTemplate;
+    private final VectorService vectorService;
+    private final PaperRepository paperRepository;
     private static final String OPENALEX_API_URL = "https://api.openalex.org/works/doi:";
 
-    public PaperService(RestTemplate restTemplate) {
+    public PaperService(RestTemplate restTemplate, VectorService vectorService, PaperRepository paperRepository) {
         this.restTemplate = restTemplate;
+        this.vectorService = vectorService;
+        this.paperRepository = paperRepository;
+    }
+
+    public List<FilteredPaperDTO> findSimilarPapers(String query, int limit) {
+        // 1. Create embedding for the query
+        List<Double> embedding = vectorService.getEmbedding(query);
+        if (embedding == null || embedding.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        // 2. Convert to PGvector string format
+        float[] floatArray = new float[embedding.size()];
+        for (int i = 0; i < embedding.size(); i++) {
+            floatArray[i] = embedding.get(i).floatValue();
+        }
+        PGvector pgVector = new PGvector(floatArray);
+
+        // 3. Find similar papers
+        List<Paper> similarPapers = paperRepository.findSimilar(pgVector.toString(), limit);
+
+        // 4. Convert to DTO
+        return similarPapers.stream()
+                .map(this::mapToFilteredPaperDTO)
+                .collect(Collectors.toList());
+    }
+
+    private FilteredPaperDTO mapToFilteredPaperDTO(Paper paper) {
+        FilteredPaperDTO dto = new FilteredPaperDTO();
+        dto.setPaperId(paper.getPaperId());
+        dto.setTitle(paper.getTitle());
+        dto.setDoi(paper.getDoi());
+
+        // For simplicity, we'll just populate the core info for now.
+        // A more complete implementation would re-use the MetadataService logic.
+        FilteredPaperDTO.CoreInfo coreInfo = new FilteredPaperDTO.CoreInfo();
+        coreInfo.setPublicationDate(paper.getPublicationDate());
+        coreInfo.setCitationCount(paper.getCitationCount());
+        coreInfo.setPdfUrl(paper.getPdfUrl());
+        if (paper.getKeywords() != null) {
+            coreInfo.setKeywords(List.of(paper.getKeywords().split(", ")));
+        }
+        if (paper.getPaperAuthors() != null) {
+            coreInfo.setAuthors(paper.getPaperAuthors().stream()
+                    .map(pa -> pa.getAuthor().getFirstName() + " " + pa.getAuthor().getLastName())
+                    .collect(Collectors.toList()));
+        }
+        if (paper.getVolume() != null && paper.getVolume().getJournal() != null) {
+            coreInfo.setVenue(paper.getVolume().getJournal().getTitle());
+        } else if (paper.getConference() != null) {
+            coreInfo.setVenue(paper.getConference().getName());
+        }
+        dto.setCoreInfo(coreInfo);
+
+        return dto;
     }
 
     public PaperResponseDTO getPaperInfoByDoi(String doi) {

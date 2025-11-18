@@ -6,11 +6,15 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.util.List;
 import java.util.Optional;
 
 @Repository
 public interface PaperRepository extends JpaRepository<Paper, Long> {
     Optional<Paper> findByDoi(String doi);
+
+    @Query(value = "SELECT * FROM paper ORDER BY embedding <=> :embedding LIMIT :limit", nativeQuery = true)
+    List<Paper> findSimilar(@Param("embedding") String embedding, @Param("limit") int limit);
 
     @Query("SELECT DISTINCT p FROM Paper p " +
             "LEFT JOIN FETCH p.paperAuthors pa " +
