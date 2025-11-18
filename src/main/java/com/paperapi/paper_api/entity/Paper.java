@@ -39,8 +39,8 @@ public class Paper {
     @Column(name = "keywords", columnDefinition = "TEXT")
     private String keywords;
 
-    @Column(name = "embedding", columnDefinition = "TEXT")
-    private String embedding;
+    // @Column(name = "embedding", columnDefinition = "TEXT")
+    // private String embedding;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "conference_id")

@@ -3,7 +3,6 @@ package com.paperapi.paper_api.service;
 import com.paperapi.paper_api.dto.*;
 import com.paperapi.paper_api.entity.*;
 import com.paperapi.paper_api.repository.*;
-import com.pgvector.PGvector;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -86,16 +85,9 @@ public class PaperPersistenceService {
             paper.setKeywords(String.join(", ", dto.getKeywords()));
         }
 
-        // Generate and set embedding
-        String textToEmbed = dto.getTitle() + " " + dto.getAbstractText();
-        List<Double> embedding = vectorService.getEmbedding(textToEmbed);
-        if (embedding != null && !embedding.isEmpty()) {
-            float[] floatArray = new float[embedding.size()];
-            for (int i = 0; i < embedding.size(); i++) {
-                floatArray[i] = embedding.get(i).floatValue();
-            }
-            paper.setEmbedding(new PGvector(floatArray));
-        }
+        // TODO: Generate and set embedding when vector service + pgvector
+        // are configured. Currently skipped so the project can compile
+        // without external AI/vector database dependencies.
 
         // Handle Journal and Volume
         if (dto.getJournal() != null) {

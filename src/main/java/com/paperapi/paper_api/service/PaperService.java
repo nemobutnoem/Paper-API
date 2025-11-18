@@ -3,9 +3,9 @@ package com.paperapi.paper_api.service;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.paperapi.paper_api.dto.PaperResponseDTO;
+import com.paperapi.paper_api.dto.FilteredPaperDTO;
 import com.paperapi.paper_api.entity.Paper;
 import com.paperapi.paper_api.repository.PaperRepository;
-import com.pgvector.PGvector;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
@@ -34,15 +34,9 @@ public class PaperService {
             return Collections.emptyList();
         }
 
-        // 2. Convert to PGvector string format
-        float[] floatArray = new float[embedding.size()];
-        for (int i = 0; i < embedding.size(); i++) {
-            floatArray[i] = embedding.get(i).floatValue();
-        }
-        PGvector pgVector = new PGvector(floatArray);
-
-        // 3. Find similar papers
-        List<Paper> similarPapers = paperRepository.findSimilar(pgVector.toString(), limit);
+        // 2. Tạm thời bỏ tính năng vector search (PGvector)
+        // TODO: Re-enable when pgvector dependency is properly configured.
+        List<Paper> similarPapers = Collections.emptyList();
 
         // 4. Convert to DTO
         return similarPapers.stream()
@@ -67,7 +61,21 @@ public class PaperService {
         }
         if (paper.getPaperAuthors() != null) {
             coreInfo.setAuthors(paper.getPaperAuthors().stream()
-                    .map(pa -> pa.getAuthor().getFirstName() + " " + pa.getAuthor().getLastName())
+                    .map(pa -> {
+                        var author = pa.getAuthor();
+                        String first = author.getFirstname();
+                        String last = author.getLastname();
+                        if (first == null && last == null) {
+                            return "";
+                        }
+                        if (first == null) {
+                            return last;
+                        }
+                        if (last == null) {
+                            return first;
+                        }
+                        return first + " " + last;
+                    })
                     .collect(Collectors.toList()));
         }
         if (paper.getVolume() != null && paper.getVolume().getJournal() != null) {
