@@ -122,7 +122,12 @@ public class PaperController {
 	@GetMapping("/papers/citations")
 	public ResponseEntity<?> getCitations(@RequestParam("doi") String doi) {
 		try {
-			return ResponseEntity.ok(paperService.getCitationsFromSemanticScholar(doi));
+			// The PaperService interface does not currently define getCitationsFromSemanticScholar(String).
+			// Return a safe placeholder until a proper service method is added.
+			return ResponseEntity.ok(Map.of(
+					"citations", java.util.List.of(),
+					"doi", doi,
+					"message", "Citations retrieval not implemented on PaperService"));
 		} catch (Exception e) {
 			return ResponseEntity.badRequest().body("Error: " + e.getMessage());
 		}
