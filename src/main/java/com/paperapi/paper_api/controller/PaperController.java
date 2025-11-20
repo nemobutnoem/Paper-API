@@ -81,6 +81,11 @@ public class PaperController {
 			response.put("message", isNew ? "Paper saved successfully" : "Paper already exists in database");
 
 			return ResponseEntity.ok(response);
+		} catch (JsonProcessingException e) {
+			e.printStackTrace();
+			return ResponseEntity.badRequest().body(Map.of(
+					"error", "Failed to process AI analysis response.",
+					"type", e.getClass().getSimpleName()));
 		} catch (Exception e) {
 			e.printStackTrace();
 			String errorMsg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
@@ -112,6 +117,11 @@ public class PaperController {
 			response.put("message", "Paper already exists in database");
 
 			return ResponseEntity.ok(response);
+		} catch (JsonProcessingException e) {
+			e.printStackTrace();
+			return ResponseEntity.badRequest().body(Map.of(
+					"error", "Failed to process AI analysis response.",
+					"type", e.getClass().getSimpleName()));
 		} catch (Exception e) {
 			return ResponseEntity.badRequest().body("Error: " + e.getMessage());
 		}
