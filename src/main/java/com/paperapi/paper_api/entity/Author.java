@@ -18,7 +18,7 @@ public class Author {
     @Column(name = "lastname", length = 100)
     private String lastname;
 
-    @Column(name = "orc_id", unique = true, length = 30)
+    @Column(name = "orc_id", unique = true, length = 100)
     private String orcId;
 
     @ManyToOne
